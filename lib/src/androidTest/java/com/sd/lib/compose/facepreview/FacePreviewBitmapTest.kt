@@ -160,6 +160,32 @@ class FacePreviewBitmapTest {
   }
 
   @Test
+  fun createWithFailureCleanup_creationFails_recyclesFacePreviewBitmaps() {
+    val image = bitmap(width = 2, colors = intArrayOf(Color.RED, Color.BLUE))
+    val faceImage = bitmap(width = 1, colors = intArrayOf(Color.GREEN))
+    val expected = OutOfMemoryError("expected")
+
+    val actual = try {
+      createWithFailureCleanup<Unit>(
+        cleanup = { recycleFacePreviewBitmaps(image, faceImage) },
+        create = { throw expected },
+      )
+      null
+    } catch (error: Throwable) {
+      error
+    }
+
+    try {
+      assertThat(actual).isSameInstanceAs(expected)
+      assertThat(image.isRecycled).isTrue()
+      assertThat(faceImage.isRecycled).isTrue()
+    } finally {
+      if (!image.isRecycled) image.recycle()
+      if (!faceImage.isRecycled) faceImage.recycle()
+    }
+  }
+
+  @Test
   fun createFacePreviewBitmap_identityCrop_preservesPixels() {
     val source = bitmap(
       width = 3,

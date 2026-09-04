@@ -176,39 +176,9 @@ fun FacePreviewView(
 
         var coordinatorGeneration = frameCoordinator.currentGeneration
         var analyzedFrame: AnalyzedFaceFrame? = null
-        state.withAnalysisFrameLease { snapshot ->
-          val analysisGeneration = snapshot.generation
-          try {
-            val frameHandle = frameCoordinator.beginFrame(faceDetector) ?: return@withAnalysisFrameLease
-            coordinatorGeneration = frameHandle.generation
-            val result = analyzeFrame(
-              frame = frame,
-              previewState = cameraState,
-              faceDetector = faceDetector,
-              state = state,
-              analysisSnapshot = snapshot,
-              frameCoordinator = frameCoordinator,
-              frameHandle = frameHandle,
-              isStableFrameMirrored = isStableFrameMirrored,
-              faceImageExpansionRatio = faceImageExpansionRatio,
-            ) ?: return@withAnalysisFrameLease
-            analyzedFrame = result
-
-            frameCoordinator.submit(frameHandle, result) { currentResult ->
-              if (!cameraState.isFrameTransformCurrent(currentResult.transformToken)) {
-                state.resetTracking()
-                return@submit
-              }
-
-              if (!state.publishAnalysisResult(currentResult.stateResult)) return@submit
-              if (currentResult.stateResult.isStable) frameCoordinator.invalidate()
-
-              if (currentResult.stateResult.isStable) {
-                deliverStableFrame(currentResult.takeStableFrame(), stableFrameCallback)
-              }
-            }
-            analyzedFrame = null
-          } catch (error: Throwable) {
+        state.runAnalysisFrameWithLease(
+          initialAnalysisGeneration = initialAnalysisGeneration,
+          onFailure = { analysisGeneration, error ->
             analyzedFrame?.also { currentFrame ->
               try {
                 currentFrame.recycle()
@@ -216,7 +186,6 @@ fun FacePreviewView(
                 if (error !== recycleError) error.addSuppressed(recycleError)
               }
             }
-            state.recoverAfterAnalysisFailure(snapshot)
             if (!error.isRecoverableFaceAnalysisFailure()) throw error
             frameCoordinator.submitError(
               generation = coordinatorGeneration,
@@ -232,7 +201,37 @@ fun FacePreviewView(
               frameCoordinator.invalidate()
               errorCallback(currentError)
             }
+          },
+        ) { snapshot ->
+          val frameHandle = frameCoordinator.beginFrame(faceDetector) ?: return@runAnalysisFrameWithLease
+          coordinatorGeneration = frameHandle.generation
+          val result = analyzeFrame(
+            frame = frame,
+            previewState = cameraState,
+            faceDetector = faceDetector,
+            state = state,
+            analysisSnapshot = snapshot,
+            frameCoordinator = frameCoordinator,
+            frameHandle = frameHandle,
+            isStableFrameMirrored = isStableFrameMirrored,
+            faceImageExpansionRatio = faceImageExpansionRatio,
+          ) ?: return@runAnalysisFrameWithLease
+          analyzedFrame = result
+
+          frameCoordinator.submit(frameHandle, result) { currentResult ->
+            if (!cameraState.isFrameTransformCurrent(currentResult.transformToken)) {
+              state.resetTracking()
+              return@submit
+            }
+
+            if (!state.publishAnalysisResult(currentResult.stateResult)) return@submit
+            if (currentResult.stateResult.isStable) frameCoordinator.invalidate()
+
+            if (currentResult.stateResult.isStable) {
+              deliverStableFrame(currentResult.takeStableFrame(), stableFrameCallback)
+            }
           }
+          analyzedFrame = null
         }
       }
       val frameProcessor = when (val source = frameSource) {
@@ -640,11 +639,15 @@ private fun analyzeFrame(
     null
   }
 
-  return AnalyzedFaceFrame(
-    stateResult = stateResult,
-    transformToken = frame.transformToken,
-    stableFrame = stableFrame,
-  )
+  return createWithFailureCleanup(
+    cleanup = { stableFrame?.recycle() },
+  ) {
+    AnalyzedFaceFrame(
+      stateResult = stateResult,
+      transformToken = frame.transformToken,
+      stableFrame = stableFrame,
+    )
+  }
 }
 
 private fun CameraFrame.createFacePreviewFrame(
@@ -735,6 +738,23 @@ internal fun deliverStableFrame(
   }
 }
 
+/** 仅在创建成功后转移资源所有权；创建失败时先清理并保留原始异常。 */
+internal inline fun <T> createWithFailureCleanup(
+  cleanup: () -> Unit,
+  create: () -> T,
+): T {
+  try {
+    return create()
+  } catch (error: Throwable) {
+    try {
+      cleanup()
+    } catch (cleanupError: Throwable) {
+      if (error !== cleanupError) error.addSuppressed(cleanupError)
+    }
+    throw error
+  }
+}
+
 internal fun Bitmap.createFacePreviewFrame(
   faceRect: RectF,
   previewMatrix: Matrix,
@@ -762,10 +782,14 @@ internal fun Bitmap.createFacePreviewFrame(
     image.recycle()
     return null
   }
-  return FacePreviewFrame(
-    image = image,
-    faceImage = faceImage,
-  )
+  return createWithFailureCleanup(
+    cleanup = { recycleFacePreviewBitmaps(image, faceImage) },
+  ) {
+    FacePreviewFrame(
+      image = image,
+      faceImage = faceImage,
+    )
+  }
 }
 
 private const val DefaultFaceImageExpansionRatio = 0.5f

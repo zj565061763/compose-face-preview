@@ -276,10 +276,51 @@ internal inline fun FacePreviewState.withAnalysisFrameLease(
   block: (FacePreviewAnalysisSnapshot) -> Unit,
 ) {
   val snapshot = beginAnalysisFrame() ?: return
+  var blockFailure: Throwable? = null
   try {
     block(snapshot)
+  } catch (error: Throwable) {
+    blockFailure = error
+    throw error
   } finally {
-    endAnalysisFrame(snapshot)
+    try {
+      endAnalysisFrame(snapshot)
+    } catch (releaseError: Throwable) {
+      val failure = blockFailure
+      if (failure == null) throw releaseError
+      if (failure !== releaseError) failure.addSuppressed(releaseError)
+    }
+  }
+}
+
+/** 统一处理 lease 获取、分析和释放异常；分析异常在仍持有 lease 时恢复并报告。 */
+internal inline fun FacePreviewState.runAnalysisFrameWithLease(
+  initialAnalysisGeneration: Long,
+  onFailure: (analysisGeneration: Long, error: Throwable) -> Unit,
+  block: (FacePreviewAnalysisSnapshot) -> Unit,
+) {
+  var analysisGeneration = initialAnalysisGeneration
+  var reportedBlockFailure: Throwable? = null
+  var isReportingBlockFailure = false
+  try {
+    withAnalysisFrameLease { snapshot ->
+      analysisGeneration = snapshot.generation
+      try {
+        block(snapshot)
+      } catch (error: Throwable) {
+        recoverAfterAnalysisFailure(snapshot)
+        isReportingBlockFailure = true
+        onFailure(analysisGeneration, error)
+        reportedBlockFailure = error
+        isReportingBlockFailure = false
+        // 让 withAnalysisFrameLease 把随后发生的释放失败附加到已经上报的原始异常。
+        throw error
+      }
+    }
+  } catch (error: Throwable) {
+    if (isReportingBlockFailure) throw error
+    if (reportedBlockFailure === error) return
+    onFailure(analysisGeneration, error)
   }
 }
 

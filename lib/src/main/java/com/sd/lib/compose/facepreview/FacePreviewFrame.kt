@@ -17,7 +17,35 @@ class FacePreviewFrame(
 ) {
   /** 回收此稳定帧持有的全部 Bitmap */
   fun recycle() {
-    image.recycle()
-    if (faceImage !== image) faceImage.recycle()
+    recycleFacePreviewBitmaps(image, faceImage)
   }
+}
+
+/** 始终尝试回收两张图片，并保留第一次回收失败。 */
+internal fun recycleFacePreviewBitmaps(
+  image: Bitmap,
+  faceImage: Bitmap,
+) {
+  var failure: Throwable? = null
+  try {
+    image.recycle()
+  } catch (error: Throwable) {
+    failure = error
+  }
+
+  if (faceImage !== image) {
+    try {
+      faceImage.recycle()
+    } catch (error: Throwable) {
+      val currentFailure = failure
+      if (currentFailure == null) {
+        failure = error
+      } else if (currentFailure !== error) {
+        currentFailure.addSuppressed(error)
+      }
+    }
+  }
+
+  val recycleFailure = failure
+  if (recycleFailure != null) throw recycleFailure
 }
