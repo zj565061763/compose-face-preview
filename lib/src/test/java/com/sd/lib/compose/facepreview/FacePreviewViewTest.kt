@@ -18,4 +18,18 @@ class FacePreviewViewTest {
     assertThat(AssertionError().isRecoverableFaceAnalysisFailure()).isFalse()
     assertThat(LinkageError().isRecoverableFaceAnalysisFailure()).isFalse()
   }
+
+  @Test
+  fun requireStableFacePreviewFrame_nullThrowsRecoverableFailure() {
+    val actual = try {
+      requireStableFacePreviewFrame(null)
+      null
+    } catch (error: Throwable) {
+      error
+    }
+
+    assertThat(actual).isInstanceOf(IllegalStateException::class.java)
+    assertThat(actual?.message).isEqualTo("Failed to convert the stable camera frame to FacePreviewFrame.")
+    assertThat(checkNotNull(actual).isRecoverableFaceAnalysisFailure()).isTrue()
+  }
 }

@@ -170,9 +170,11 @@ class FacePreviewState(
     )
   }
 
-  /** 恢复当前帧在结果发布前停止的检测；generation 已变化时不覆盖新状态。 */
+  /** 恢复当前帧在结果发布前停止的检测；仅持有该帧 lease 时生效。 */
   internal fun recoverAfterAnalysisFailure(snapshot: FacePreviewAnalysisSnapshot) {
     while (true) {
+      if (_analysisLease.get() !== snapshot.lease) return
+
       val current = _analysisControl.get()
       if (
         current.generation != snapshot.generation ||
@@ -208,11 +210,10 @@ class FacePreviewState(
 
   /** 检测异常后暂停后续帧，等待显式重置或检测器配置变化。 */
   internal fun stopDetectionAfterError(error: Throwable) {
-    if (_isStable.value) return
-
     updateAnalysisControl(shouldDetect = false, isPausedByError = true)
     _failure.value = error
     _faceRect.value = Rect.Zero
+    _isStable.value = false
   }
 
   /** 更新检测器身份；返回实例是否变化，并在变化时解除异常暂停、重新开始跟踪。 */

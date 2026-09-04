@@ -213,6 +213,35 @@ class FacePreviewStateTest {
   }
 
   @Test
+  fun recoverAfterAnalysisFailure_releasedLeaseDoesNotResumeNextStableResult() {
+    val state = stateWithResult(true)
+    state.updatePreviewSize(IntSize(100, 100))
+    val failedSnapshot = checkNotNull(state.beginAnalysisFrame())
+    state.endAnalysisFrame(failedSnapshot)
+    val currentSnapshot = checkNotNull(state.beginAnalysisFrame())
+
+    try {
+      val currentResult = checkNotNull(
+        state.analyzeFrame(
+          snapshot = currentSnapshot,
+          frame = syntheticFrame(Rect(10f, 20f, 30f, 40f), currentSnapshot.previewSize),
+          resetForTransformChange = false,
+        )
+      )
+      assertThat(currentResult.isStable).isTrue()
+      assertThat(state.shouldDetectFace).isFalse()
+
+      state.recoverAfterAnalysisFailure(failedSnapshot)
+
+      assertThat(state.shouldDetectFace).isFalse()
+      assertThat(state.publishAnalysisResult(currentResult)).isTrue()
+      assertThat(state.isStable.value).isTrue()
+    } finally {
+      state.endAnalysisFrame(currentSnapshot)
+    }
+  }
+
+  @Test
   fun analyzeFrame_stableResultStopsDetectionUntilReset() {
     var stable = false
     var onFrameCount = 0
@@ -358,6 +387,20 @@ class FacePreviewStateTest {
     assertThat(state.shouldDetectFace).isFalse()
     assertThat(state.processFrame(Rect(10f, 20f, 30f, 40f))).isNull()
     assertThat(onFrameCount).isEqualTo(1)
+  }
+
+  @Test
+  fun stopDetectionAfterError_replacesStableStateWithFailure() {
+    val state = stateWithResult(true)
+    val expected = IllegalStateException("expected")
+    state.updatePreviewSize(IntSize(100, 100))
+    state.processFrame(Rect(10f, 20f, 30f, 40f))
+
+    state.stopDetectionAfterError(expected)
+
+    assertThat(state.isStable.value).isFalse()
+    assertThat(state.failure.value).isSameInstanceAs(expected)
+    assertThat(state.shouldDetectFace).isFalse()
   }
 
   @Test

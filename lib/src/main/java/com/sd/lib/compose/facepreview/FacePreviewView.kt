@@ -67,6 +67,7 @@ import android.graphics.Rect as AndroidRect
  * 错误与恢复：
  *
  * - 人脸分析抛出 [Exception] 或发生 [OutOfMemoryError] 后暂停分析，将故障发布到 [FacePreviewState.failure] 并调用 [onError]。
+ * - 稳定帧无法转换为 [FacePreviewFrame] 时按可恢复的人脸分析故障处理。
  * - 其他 [Error] 会在恢复内部状态后继续抛出，不会转换为普通检测错误。
  * - 更换 [faceDetector]、调用 [FacePreviewState.retry] 或 [FacePreviewState.resetStability] 后恢复人脸分析。
  * - 相机发生不可恢复错误时，可调用 [cameraState] 的 [CameraPreviewState.retry] 重新绑定会话。
@@ -107,12 +108,14 @@ fun FacePreviewView(
   val usesSampledFrames = frameSource is FacePreviewFrameSource.PreviewSampled
   val errorCallback by rememberUpdatedState(onError)
   val stableFrameCallback by rememberUpdatedState(onStableFrame)
+  // 坐标或稳定帧配置变化时重建协调器，由 DisposableEffect 清空旧跟踪结果
   val frameCoordinator = remember(
     state,
     cameraState,
     devicesState,
     cameraId,
     mirrorMode,
+    contentScale,
     usesSampledFrames,
     isStableFrameMirrored,
     faceImageExpansionRatio,
@@ -154,18 +157,28 @@ fun FacePreviewView(
     // 会话输入变化时隔离内部 rememberUpdatedState，避免旧会话改用新协调器处理帧。
     key(cameraState, devicesState, cameraId) {
       val frameCallback: (CameraFrame) -> Unit = frameCallback@ { frame ->
-        if (!frameCoordinator.canAnalyzeFrame) return@frameCallback
         val frameTransformToken = frame.transformToken
-        var analysisGeneration = state.currentAnalysisGeneration
+        if (!cameraState.isFrameTransformCurrent(frameTransformToken)) return@frameCallback
+
+        val initialAnalysisGeneration = state.currentAnalysisGeneration
+        if (
+          !frameCoordinator.prepareFrame(
+            transformToken = frameTransformToken,
+            analysisGeneration = initialAnalysisGeneration,
+            isFrameCurrent = {
+              state.isAnalysisGenerationCurrent(initialAnalysisGeneration) &&
+                cameraState.isFrameTransformCurrent(frameTransformToken)
+            },
+          )
+        ) {
+          return@frameCallback
+        }
+
         var coordinatorGeneration = frameCoordinator.currentGeneration
-        var analysisSnapshot: FacePreviewAnalysisSnapshot? = null
         var analyzedFrame: AnalyzedFaceFrame? = null
-
-        try {
-          state.withAnalysisFrameLease { snapshot ->
-            analysisSnapshot = snapshot
-            analysisGeneration = snapshot.generation
-
+        state.withAnalysisFrameLease { snapshot ->
+          val analysisGeneration = snapshot.generation
+          try {
             val frameHandle = frameCoordinator.beginFrame(faceDetector) ?: return@withAnalysisFrameLease
             coordinatorGeneration = frameHandle.generation
             val result = analyzeFrame(
@@ -191,37 +204,34 @@ fun FacePreviewView(
               if (currentResult.stateResult.isStable) frameCoordinator.invalidate()
 
               if (currentResult.stateResult.isStable) {
-                val stableFrame = currentResult.takeStableFrame()
-                if (stableFrame == null) {
-                  state.resetStability()
-                } else {
-                  deliverStableFrame(stableFrame, stableFrameCallback)
-                }
+                deliverStableFrame(currentResult.takeStableFrame(), stableFrameCallback)
               }
             }
             analyzedFrame = null
-          }
-        } catch (error: Throwable) {
-          analyzedFrame?.also { currentFrame ->
-            try {
-              currentFrame.recycle()
-            } catch (recycleError: Throwable) {
-              if (error !== recycleError) error.addSuppressed(recycleError)
+          } catch (error: Throwable) {
+            analyzedFrame?.also { currentFrame ->
+              try {
+                currentFrame.recycle()
+              } catch (recycleError: Throwable) {
+                if (error !== recycleError) error.addSuppressed(recycleError)
+              }
             }
-          }
-          analysisSnapshot?.also(state::recoverAfterAnalysisFailure)
-          if (!error.isRecoverableFaceAnalysisFailure()) throw error
-          frameCoordinator.submitError(
-            generation = coordinatorGeneration,
-            error = error,
-            isErrorCurrent = {
-              state.isAnalysisGenerationCurrent(analysisGeneration) &&
-                cameraState.isFrameTransformCurrent(frameTransformToken)
-            },
-          ) { currentError ->
-            state.stopDetectionAfterError(currentError)
-            frameCoordinator.invalidate()
-            errorCallback(currentError)
+            state.recoverAfterAnalysisFailure(snapshot)
+            if (!error.isRecoverableFaceAnalysisFailure()) throw error
+            frameCoordinator.submitError(
+              generation = coordinatorGeneration,
+              analysisGeneration = analysisGeneration,
+              transformToken = frameTransformToken,
+              error = error,
+              isErrorCurrent = {
+                state.isAnalysisGenerationCurrent(analysisGeneration) &&
+                  cameraState.isFrameTransformCurrent(frameTransformToken)
+              },
+            ) { currentError ->
+              state.stopDetectionAfterError(currentError)
+              frameCoordinator.invalidate()
+              errorCallback(currentError)
+            }
           }
         }
       }
@@ -307,11 +317,19 @@ internal fun handlePreviewSizeChanged(
   state.resetTracking()
 }
 
-/** 丢弃过期工作，并分别将待发布的分析结果和错误合并为一个主线程任务。 */
+/** 丢弃过期工作，合并待发布帧，并让分析错误优先终止当前帧 generation。 */
 internal data class DetectedFrameHandle(
   val sequence: Long,
   val generation: Long,
 )
+
+private class DetectedFrameErrorHandle(
+  val generation: Long,
+  val analysisGeneration: Long,
+  val transformToken: CameraFrameTransformToken,
+) {
+  var isDeliveryClaimed = false
+}
 
 internal class DetectedFrameCoordinator(
   executor: Executor,
@@ -321,20 +339,23 @@ internal class DetectedFrameCoordinator(
   private val _sequence = AtomicLong()
   private val _generation = AtomicLong()
   private val _detectorIdentity = AtomicReference<Any?>()
+  private val _errorStateLock = Any()
   private val _frameDispatcher = ConflatedExecutorDispatcher<AnalyzedFaceFrame>(
     executor = executor,
     onDispose = AnalyzedFaceFrame::recycle,
   )
   private val _errorDispatcher = ConflatedExecutorDispatcher<Throwable>(executor)
+  @Volatile
+  private var _pendingError: DetectedFrameErrorHandle? = null
   private var _transformToken: CameraFrameTransformToken? = null
   private var _previewMatrixValues: FloatArray? = null
 
   val isActive: Boolean
     get() = _isActive.get()
 
-  /** 只有当前预览变换已经完成组合发布时，分析线程才可以开始处理帧。 */
+  /** 当前预览变换已经发布且没有待处理错误时，分析线程才可以开始处理帧。 */
   val canAnalyzeFrame: Boolean
-    get() = _isActive.get() && _isTransformReady.get()
+    get() = canAnalyzeFrameWithoutErrorBarrier() && _pendingError == null
 
   val currentGeneration: Long
     get() = _generation.get()
@@ -350,6 +371,31 @@ internal class DetectedFrameCoordinator(
     return previousDetector != null && previousDetector !== detector
   }
 
+  /** 丢弃已经不属于当前分析 generation 或预览变换的待发布错误 */
+  fun prepareFrame(
+    transformToken: CameraFrameTransformToken,
+    analysisGeneration: Long,
+    isFrameCurrent: () -> Boolean,
+  ): Boolean {
+    synchronized(_errorStateLock) {
+      if (!canAnalyzeFrameWithoutErrorBarrier()) return false
+
+      val pendingError = _pendingError ?: return true
+      if (pendingError.isDeliveryClaimed) return false
+      if (
+        pendingError.analysisGeneration == analysisGeneration &&
+        pendingError.transformToken.isSameTransform(transformToken)
+      ) {
+        return false
+      }
+      if (!isFrameCurrent()) return false
+
+      _pendingError = null
+      _errorDispatcher.clear()
+      return canAnalyzeFrameWithoutErrorBarrier()
+    }
+  }
+
   fun beginFrame(detector: Any): DetectedFrameHandle? {
     if (_detectorIdentity.get() !== detector || !canAnalyzeFrame) return null
     val generation = _generation.get()
@@ -363,9 +409,12 @@ internal class DetectedFrameCoordinator(
   }
 
   fun invalidate() {
-    advance()
-    _generation.incrementAndGet()
-    _errorDispatcher.clear()
+    synchronized(_errorStateLock) {
+      advance()
+      _generation.incrementAndGet()
+      _pendingError = null
+      _errorDispatcher.clear()
+    }
   }
 
   /** 失效待发布帧，并阻止新帧使用尚未完成更新的预览矩阵。 */
@@ -419,30 +468,92 @@ internal class DetectedFrameCoordinator(
   }
 
   fun submitError(
-    frameHandle: DetectedFrameHandle,
+    generation: Long,
+    analysisGeneration: Long,
+    transformToken: CameraFrameTransformToken,
     error: Throwable,
     isErrorCurrent: () -> Boolean = { true },
     onError: (Throwable) -> Unit,
-  ) {
-    submitError(
-      generation = frameHandle.generation,
-      error = error,
-      isErrorCurrent = isErrorCurrent,
-      onError = onError,
-    )
+  ): Boolean {
+    val errorHandle = beginError(
+      generation = generation,
+      analysisGeneration = analysisGeneration,
+      transformToken = transformToken,
+    ) ?: return false
+
+    try {
+      _errorDispatcher.submit(
+        value = error,
+        isCurrent = { isCurrentGeneration(generation) && _pendingError === errorHandle },
+        onValue = onValue@ { currentError ->
+          if (!claimErrorDelivery(errorHandle, isErrorCurrent)) return@onValue
+          try {
+            onError(currentError)
+          } finally {
+            completeError(errorHandle)
+          }
+        },
+      )
+    } catch (dispatchError: Throwable) {
+      completeError(errorHandle)
+      throw dispatchError
+    }
+    return true
   }
 
-  fun submitError(
+  private fun beginError(
     generation: Long,
-    error: Throwable,
-    isErrorCurrent: () -> Boolean = { true },
-    onError: (Throwable) -> Unit,
-  ) {
-    _errorDispatcher.submit(
-      value = error,
-      isCurrent = { isCurrentGeneration(generation) && isErrorCurrent() },
-      onValue = onError,
-    )
+    analysisGeneration: Long,
+    transformToken: CameraFrameTransformToken,
+  ): DetectedFrameErrorHandle? {
+    synchronized(_errorStateLock) {
+      if (!canAnalyzeFrameWithoutErrorBarrier() || !isCurrentGeneration(generation)) return null
+      if (_pendingError != null) return null
+
+      val errorHandle = DetectedFrameErrorHandle(
+        generation = generation,
+        analysisGeneration = analysisGeneration,
+        transformToken = transformToken,
+      )
+      _pendingError = errorHandle
+      return try {
+        advance()
+        errorHandle
+      } catch (error: Throwable) {
+        if (_pendingError === errorHandle) _pendingError = null
+        throw error
+      }
+    }
+  }
+
+  private fun claimErrorDelivery(
+    errorHandle: DetectedFrameErrorHandle,
+    isErrorCurrent: () -> Boolean,
+  ): Boolean {
+    synchronized(_errorStateLock) {
+      if (
+        _pendingError !== errorHandle ||
+        errorHandle.isDeliveryClaimed ||
+        !isCurrentGeneration(errorHandle.generation) ||
+        !isErrorCurrent()
+      ) {
+        if (_pendingError === errorHandle && !errorHandle.isDeliveryClaimed) _pendingError = null
+        return false
+      }
+
+      errorHandle.isDeliveryClaimed = true
+      return true
+    }
+  }
+
+  private fun completeError(errorHandle: DetectedFrameErrorHandle) {
+    synchronized(_errorStateLock) {
+      if (_pendingError === errorHandle) _pendingError = null
+    }
+  }
+
+  private fun canAnalyzeFrameWithoutErrorBarrier(): Boolean {
+    return _isActive.get() && _isTransformReady.get()
   }
 
   private fun isCurrentFrame(frameHandle: DetectedFrameHandle): Boolean {
@@ -514,14 +625,17 @@ private fun analyzeFrame(
   ) ?: return null
 
   val stableFrame = if (stateResult.isStable) {
-    detectedFace?.let { face ->
+    val face = checkNotNull(detectedFace) {
+      "Stable analysis result does not contain a detected face."
+    }
+    requireStableFacePreviewFrame(
       frame.createFacePreviewFrame(
         faceRect = face.rawFaceRect,
         previewMatrix = previewMatrix,
         isMirrored = isStableFrameMirrored,
         faceImageExpansionRatio = faceImageExpansionRatio,
       )
-    }
+    )
   } else {
     null
   }
@@ -562,6 +676,10 @@ private fun CameraFrame.createFacePreviewFrame(
   }
 }
 
+internal fun requireStableFacePreviewFrame(frame: FacePreviewFrame?): FacePreviewFrame {
+  return checkNotNull(frame) { "Failed to convert the stable camera frame to FacePreviewFrame." }
+}
+
 internal data class DetectedFaceCandidate(
   val rawFaceRect: RectF,
   val previewFaceRect: RectF,
@@ -578,10 +696,18 @@ internal class AnalyzedFaceFrame(
   val transformToken: CameraFrameTransformToken,
   stableFrame: FacePreviewFrame?,
 ) {
+  init {
+    check(!stateResult.isStable || stableFrame != null) {
+      "Stable analysis result must contain a FacePreviewFrame."
+    }
+  }
+
   private var _stableFrame = stableFrame
 
-  fun takeStableFrame(): FacePreviewFrame? {
-    val stableFrame = _stableFrame
+  fun takeStableFrame(): FacePreviewFrame {
+    val stableFrame = checkNotNull(_stableFrame) {
+      "Stable analysis result does not contain a FacePreviewFrame."
+    }
     _stableFrame = null
     return stableFrame
   }

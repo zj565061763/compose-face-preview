@@ -35,6 +35,98 @@ class DetectedFrameCoordinatorTest {
   }
 
   @Test
+  fun submitError_invalidatesPendingFrameAndBlocksLaterFramesUntilDelivery() {
+    val queuedTasks = mutableListOf<Runnable>()
+    val coordinator = readyCoordinator(Executor(queuedTasks::add))
+    val pendingFrame = analyzedFrame()
+    var publishedFrame: AnalyzedFaceFrame? = null
+    coordinator.submit(
+      frameHandle = checkNotNull(coordinator.beginFrame(TestDetector)),
+      frame = pendingFrame,
+    ) { publishedFrame = it }
+    val errorFrameHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+    val errorTransform = transformToken()
+    val expected = OutOfMemoryError("expected")
+    var reported: Throwable? = null
+
+    assertThat(
+      coordinator.submitTestError(
+        frameHandle = errorFrameHandle,
+        error = expected,
+        frameTransformToken = errorTransform,
+      ) { reported = it }
+    ).isTrue()
+
+    assertThat(coordinator.canAnalyzeFrame).isFalse()
+    assertThat(
+      coordinator.prepareFrame(
+        transformToken = errorTransform,
+        analysisGeneration = 0L,
+        isFrameCurrent = { true },
+      )
+    ).isFalse()
+    assertThat(coordinator.beginFrame(TestDetector)).isNull()
+    assertThat(queuedTasks).hasSize(2)
+    queuedTasks[0].run()
+    assertThat(publishedFrame).isNull()
+    queuedTasks[1].run()
+    assertThat(reported).isSameInstanceAs(expected)
+    assertThat(coordinator.canAnalyzeFrame).isTrue()
+  }
+
+  @Test
+  fun prepareFrame_currentNewTransformDiscardsPendingError() {
+    val queuedTasks = mutableListOf<Runnable>()
+    val coordinator = readyCoordinator(Executor(queuedTasks::add))
+    val oldTransform = transformToken()
+    val currentTransform = transformToken()
+    val errorFrameHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+    var reported: Throwable? = null
+    coordinator.submitTestError(
+      frameHandle = errorFrameHandle,
+      error = IllegalStateException("stale transform"),
+      analysisGeneration = 3L,
+      frameTransformToken = oldTransform,
+    ) { reported = it }
+
+    val canAnalyze = coordinator.prepareFrame(
+      transformToken = currentTransform,
+      analysisGeneration = 3L,
+      isFrameCurrent = { true },
+    )
+
+    assertThat(canAnalyze).isTrue()
+    assertThat(coordinator.beginFrame(TestDetector)).isNotNull()
+    queuedTasks.single().run()
+    assertThat(reported).isNull()
+  }
+
+  @Test
+  fun prepareFrame_currentNewAnalysisGenerationDiscardsPendingError() {
+    val queuedTasks = mutableListOf<Runnable>()
+    val coordinator = readyCoordinator(Executor(queuedTasks::add))
+    val frameTransformToken = transformToken()
+    val errorFrameHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+    var reported: Throwable? = null
+    coordinator.submitTestError(
+      frameHandle = errorFrameHandle,
+      error = IllegalStateException("stale analysis"),
+      analysisGeneration = 3L,
+      frameTransformToken = frameTransformToken,
+    ) { reported = it }
+
+    val canAnalyze = coordinator.prepareFrame(
+      transformToken = frameTransformToken,
+      analysisGeneration = 4L,
+      isFrameCurrent = { true },
+    )
+
+    assertThat(canAnalyze).isTrue()
+    queuedTasks.single().run()
+    assertThat(reported).isNull()
+  }
+
+  @Test
   fun handlePreviewError_afterCoordinatorClosed_ignoresDelayedError() {
     val coordinator = DetectedFrameCoordinator(DirectExecutor)
     val expected = IllegalStateException("stale preview")
@@ -81,7 +173,7 @@ class DetectedFrameCoordinatorTest {
     )
     var reported: Throwable? = null
     val expected = IllegalStateException("current session")
-    coordinator.submitError(currentHandle, expected) { reported = it }
+    coordinator.submitTestError(currentHandle, expected) { reported = it }
 
     assertThat(reported).isSameInstanceAs(expected)
   }
@@ -98,7 +190,7 @@ class DetectedFrameCoordinatorTest {
 
     handlePreviewUnavailable(state, coordinator)
     var reported: Throwable? = null
-    coordinator.submitError(
+    coordinator.submitTestError(
       pendingHandle,
       IllegalStateException("unavailable preview"),
     ) { reported = it }
@@ -142,7 +234,7 @@ class DetectedFrameCoordinatorTest {
     handlePreviewSizeChanged(state, coordinator, IntSize(100, 100))
     var reported: Throwable? = null
     val expected = IllegalStateException("current size")
-    coordinator.submitError(frameHandle, expected) { reported = it }
+    coordinator.submitTestError(frameHandle, expected) { reported = it }
 
     assertThat(coordinator.canAnalyzeFrame).isTrue()
     assertThat(state.isAnalysisGenerationCurrent(snapshot.generation)).isTrue()
@@ -162,7 +254,7 @@ class DetectedFrameCoordinatorTest {
 
     handlePreviewSizeChanged(state, coordinator, IntSize(200, 100))
     var reported: Throwable? = null
-    coordinator.submitError(frameHandle, IllegalStateException("stale size")) { reported = it }
+    coordinator.submitTestError(frameHandle, IllegalStateException("stale size")) { reported = it }
 
     assertThat(coordinator.canAnalyzeFrame).isFalse()
     assertThat(state.isAnalysisGenerationCurrent(snapshot.generation)).isFalse()
@@ -191,7 +283,7 @@ class DetectedFrameCoordinatorTest {
       detector = equalDetector,
       frameCoordinator = coordinator,
     )
-    coordinator.submitError(
+    coordinator.submitTestError(
       frameHandle = oldHandle,
       error = IllegalStateException("stale detector"),
     ) {
@@ -229,7 +321,7 @@ class DetectedFrameCoordinatorTest {
   }
 
   @Test
-  fun submitError_whileMainTaskIsPending_reusesSingleQueuedTaskForLatestError() {
+  fun submitError_whileErrorIsPending_keepsFirstTerminalError() {
     val queuedTasks = mutableListOf<Runnable>()
     val queuedExecutor = Executor(queuedTasks::add)
     val coordinator = readyCoordinator(queuedExecutor)
@@ -238,12 +330,12 @@ class DetectedFrameCoordinatorTest {
     val secondError = IllegalStateException("second")
     var reported: Throwable? = null
 
-    coordinator.submitError(frameHandle, firstError) { reported = it }
-    coordinator.submitError(frameHandle, secondError) { reported = it }
+    assertThat(coordinator.submitTestError(frameHandle, firstError) { reported = it }).isTrue()
+    assertThat(coordinator.submitTestError(frameHandle, secondError) { reported = it }).isFalse()
 
     assertThat(queuedTasks).hasSize(1)
     queuedTasks.single().run()
-    assertThat(reported).isSameInstanceAs(secondError)
+    assertThat(reported).isSameInstanceAs(firstError)
   }
 
   @Test
@@ -254,7 +346,7 @@ class DetectedFrameCoordinatorTest {
     val expected = IllegalStateException("expected")
     var reported: Throwable? = null
 
-    coordinator.submitError(errorHandle, expected) { reported = it }
+    coordinator.submitTestError(errorHandle, expected) { reported = it }
 
     assertThat(reported).isSameInstanceAs(expected)
   }
@@ -266,7 +358,7 @@ class DetectedFrameCoordinatorTest {
     val expected = OutOfMemoryError("expected")
     var reported: Throwable? = null
 
-    coordinator.submitError(generation, expected) { reported = it }
+    coordinator.submitTestError(generation, expected) { reported = it }
 
     assertThat(reported).isSameInstanceAs(expected)
   }
@@ -279,7 +371,7 @@ class DetectedFrameCoordinatorTest {
     val errorHandle = checkNotNull(coordinator.beginFrame(TestDetector))
     var reported: Throwable? = null
 
-    coordinator.submitError(errorHandle, IllegalStateException("stale")) {
+    coordinator.submitTestError(errorHandle, IllegalStateException("stale")) {
       reported = it
     }
     coordinator.invalidate()
@@ -297,7 +389,7 @@ class DetectedFrameCoordinatorTest {
     val errorHandle = checkNotNull(coordinator.beginFrame(TestDetector))
     var reported: Throwable? = null
 
-    coordinator.submitError(
+    coordinator.submitTestError(
       frameHandle = errorHandle,
       error = IllegalStateException("stale transform"),
       isErrorCurrent = { isTransformCurrent },
@@ -324,7 +416,7 @@ class DetectedFrameCoordinatorTest {
     val errorHandle = checkNotNull(coordinator.beginFrame(TestDetector))
     var reported: Throwable? = null
 
-    coordinator.submitError(
+    coordinator.submitTestError(
       frameHandle = errorHandle,
       error = IllegalStateException("stale analysis"),
       isErrorCurrent = { state.isAnalysisGenerationCurrent(snapshot.generation) },
@@ -339,6 +431,42 @@ class DetectedFrameCoordinatorTest {
 
   private object DirectExecutor : Executor {
     override fun execute(command: Runnable) = command.run()
+  }
+
+  private fun DetectedFrameCoordinator.submitTestError(
+    frameHandle: DetectedFrameHandle,
+    error: Throwable,
+    analysisGeneration: Long = 0L,
+    frameTransformToken: CameraFrameTransformToken = transformToken(),
+    isErrorCurrent: () -> Boolean = { true },
+    onError: (Throwable) -> Unit,
+  ): Boolean {
+    return submitError(
+      generation = frameHandle.generation,
+      analysisGeneration = analysisGeneration,
+      transformToken = frameTransformToken,
+      error = error,
+      isErrorCurrent = isErrorCurrent,
+      onError = onError,
+    )
+  }
+
+  private fun DetectedFrameCoordinator.submitTestError(
+    generation: Long,
+    error: Throwable,
+    analysisGeneration: Long = 0L,
+    frameTransformToken: CameraFrameTransformToken = transformToken(),
+    isErrorCurrent: () -> Boolean = { true },
+    onError: (Throwable) -> Unit,
+  ): Boolean {
+    return submitError(
+      generation = generation,
+      analysisGeneration = analysisGeneration,
+      transformToken = frameTransformToken,
+      error = error,
+      isErrorCurrent = isErrorCurrent,
+      onError = onError,
+    )
   }
 
   private fun readyCoordinator(executor: Executor): DetectedFrameCoordinator {
