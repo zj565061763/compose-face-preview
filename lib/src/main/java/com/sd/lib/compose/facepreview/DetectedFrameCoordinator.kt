@@ -86,7 +86,7 @@ internal class DetectedFrameCoordinator(
     }
   }
 
-  /** 在分析 lease 内开始一帧，保留上一帧尚未发布的结果 */
+  /** 在分析 lease 内开始一帧，保留上一帧尚未发布的结果。 */
   fun beginFrame(detector: Any): DetectedFrameHandle? {
     if (_detectorIdentity.get() !== detector || !canAnalyzeFrame) return null
     val generation = _generation.get()
