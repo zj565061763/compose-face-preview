@@ -28,10 +28,95 @@ class DetectedFrameCoordinatorTest {
       frameHandle = checkNotNull(coordinator.beginFrame(TestDetector)),
       frame = secondFrame,
     ) { publishedFrame = it }
+    checkNotNull(coordinator.beginFrame(TestDetector))
 
     assertThat(queuedTasks).hasSize(1)
     queuedTasks.single().run()
     assertThat(publishedFrame).isSameInstanceAs(secondFrame)
+  }
+
+  @Test
+  fun submit_nextFrameStillAnalyzing_deliversCompletedFrame() {
+    val queuedTasks = mutableListOf<Runnable>()
+    val coordinator = readyCoordinator(Executor(queuedTasks::add))
+    val completedFrame = analyzedFrame()
+    var publishedFrame: AnalyzedFaceFrame? = null
+    coordinator.submit(
+      frameHandle = checkNotNull(coordinator.beginFrame(TestDetector)),
+      frame = completedFrame,
+    ) { publishedFrame = it }
+
+    checkNotNull(coordinator.beginFrame(TestDetector))
+    queuedTasks.single().run()
+
+    assertThat(publishedFrame).isSameInstanceAs(completedFrame)
+  }
+
+  @Test
+  fun submit_continuousAnalysis_publishesFaceUpdatesAndMissingFace() {
+    val queuedTasks = mutableListOf<Runnable>()
+    val coordinator = readyCoordinator(Executor(queuedTasks::add))
+    val state = FacePreviewState(stability = statelessStability())
+    val publishedRects = mutableListOf<Rect>()
+    val expectedRects = List(100) { index -> Rect(index.toFloat(), 10f, index + 20f, 30f) } + Rect.Zero
+    var frameHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+
+    expectedRects.forEach { faceRect ->
+      coordinator.submit(frameHandle, analyzedFrame(faceRect)) { frame ->
+        check(state.publishAnalysisResult(frame.stateResult))
+        publishedRects += state.faceRect.value
+      }
+      // 分析线程立即处理下一帧，主线程在该帧推理期间发布此前已完成的结果。
+      frameHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+      queuedTasks.removeAt(0).run()
+    }
+
+    assertThat(publishedRects).containsExactlyElementsIn(expectedRects).inOrder()
+    assertThat(state.faceRect.value).isEqualTo(Rect.Zero)
+  }
+
+  @Test
+  fun submit_afterInvalidation_discardsPendingAndInFlightFrames() {
+    val invalidations = listOf<(DetectedFrameCoordinator) -> Unit>(
+      DetectedFrameCoordinator::invalidate,
+      DetectedFrameCoordinator::invalidateTransform,
+      DetectedFrameCoordinator::close,
+    )
+    invalidations.forEach { invalidate ->
+      val queuedTasks = mutableListOf<Runnable>()
+      val coordinator = readyCoordinator(Executor(queuedTasks::add))
+      val publishedFrames = mutableListOf<AnalyzedFaceFrame>()
+      coordinator.submit(
+        frameHandle = checkNotNull(coordinator.beginFrame(TestDetector)),
+        frame = analyzedFrame(),
+        onFrame = publishedFrames::add,
+      )
+      val inFlightHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+
+      invalidate(coordinator)
+      coordinator.submit(inFlightHandle, analyzedFrame(), publishedFrames::add)
+      queuedTasks.forEach(Runnable::run)
+
+      assertThat(publishedFrames).isEmpty()
+    }
+  }
+
+  @Test
+  fun submit_afterErrorDelivered_discardsInFlightFrame() {
+    val queuedTasks = mutableListOf<Runnable>()
+    val coordinator = readyCoordinator(Executor(queuedTasks::add))
+    val frameHandle = checkNotNull(coordinator.beginFrame(TestDetector))
+    val expected = IllegalStateException("analysis failed")
+    var reported: Throwable? = null
+    var publishedFrame: AnalyzedFaceFrame? = null
+    coordinator.submitTestError(frameHandle, expected) { reported = it }
+    queuedTasks.removeAt(0).run()
+
+    coordinator.submit(frameHandle, analyzedFrame()) { publishedFrame = it }
+    queuedTasks.forEach(Runnable::run)
+
+    assertThat(reported).isSameInstanceAs(expected)
+    assertThat(publishedFrame).isNull()
   }
 
   @Test
@@ -476,11 +561,11 @@ class DetectedFrameCoordinatorTest {
     }
   }
 
-  private fun analyzedFrame(): AnalyzedFaceFrame {
+  private fun analyzedFrame(faceRect: Rect = Rect.Zero): AnalyzedFaceFrame {
     return AnalyzedFaceFrame(
       stateResult = FacePreviewAnalysisResult(
         generation = 0L,
-        faceRect = Rect.Zero,
+        faceRect = faceRect,
         isStable = false,
       ),
       transformToken = transformToken(),

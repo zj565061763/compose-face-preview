@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** 丢弃过期工作，合并待发布帧，并让分析错误优先终止当前帧 generation。 */
 internal data class DetectedFrameHandle(
-  val sequence: Long,
+  val revision: Long,
   val generation: Long,
 )
 
@@ -26,7 +26,7 @@ internal class DetectedFrameCoordinator(
 ) {
   private val _isActive = AtomicBoolean(true)
   private val _isTransformReady = AtomicBoolean(false)
-  private val _sequence = AtomicLong()
+  private val _frameRevision = AtomicLong()
   private val _generation = AtomicLong()
   private val _detectorIdentity = AtomicReference<Any?>()
   private val _errorStateLock = Any()
@@ -86,11 +86,12 @@ internal class DetectedFrameCoordinator(
     }
   }
 
+  /** 在分析 lease 内开始一帧，保留上一帧尚未发布的结果 */
   fun beginFrame(detector: Any): DetectedFrameHandle? {
     if (_detectorIdentity.get() !== detector || !canAnalyzeFrame) return null
     val generation = _generation.get()
     val frameHandle = DetectedFrameHandle(
-      sequence = advance(),
+      revision = _frameRevision.get(),
       generation = generation,
     )
     return frameHandle.takeIf {
@@ -100,7 +101,7 @@ internal class DetectedFrameCoordinator(
 
   fun invalidate() {
     synchronized(_errorStateLock) {
-      advance()
+      invalidateFrames()
       _generation.incrementAndGet()
       _pendingError = null
       _errorDispatcher.clear()
@@ -139,10 +140,9 @@ internal class DetectedFrameCoordinator(
         !previousMatrixValues.contentEquals(matrixValues))
   }
 
-  private fun advance(): Long {
-    val frameSequence = _sequence.incrementAndGet()
+  private fun invalidateFrames() {
+    _frameRevision.incrementAndGet()
     _frameDispatcher.clear()
-    return frameSequence
   }
 
   fun submit(
@@ -207,7 +207,7 @@ internal class DetectedFrameCoordinator(
       )
       _pendingError = errorHandle
       return try {
-        advance()
+        invalidateFrames()
         errorHandle
       } catch (error: Throwable) {
         if (_pendingError === errorHandle) _pendingError = null
@@ -247,7 +247,7 @@ internal class DetectedFrameCoordinator(
   }
 
   private fun isCurrentFrame(frameHandle: DetectedFrameHandle): Boolean {
-    return isCurrentGeneration(frameHandle) && _sequence.get() == frameHandle.sequence
+    return isCurrentGeneration(frameHandle) && _frameRevision.get() == frameHandle.revision
   }
 
   private fun isCurrentGeneration(frameHandle: DetectedFrameHandle): Boolean {
