@@ -14,6 +14,7 @@ sealed interface FacePreviewFrameSource {
     }
 
     companion object {
+      /** 采样间隔为 200 毫秒的默认配置 */
       val Default = PreviewSampled(200)
     }
   }

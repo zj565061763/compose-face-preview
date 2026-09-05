@@ -53,7 +53,7 @@ class FacePreviewState(
   val previewSize: State<Size>
     get() = _previewSize
 
-  /** 人脸矩形，未检测到完全位于预览区域内的人脸或已经达到稳定状态时为 [Rect.Zero] */
+  /** 人脸矩形，未检测到完全位于预览区域内的人脸或已经达到稳定状态时为 [Rect.Zero]。 */
   val faceRect: State<Rect>
     get() = _faceRect
 
@@ -61,7 +61,7 @@ class FacePreviewState(
   val isStable: State<Boolean>
     get() = _isStable
 
-  /** 当前导致人脸分析暂停的故障，不包含相机会话故障 */
+  /** 当前导致人脸分析暂停的故障，不包含相机会话故障。 */
   val failure: State<Throwable?>
     get() = _failure
 
@@ -76,7 +76,7 @@ class FacePreviewState(
     restartAnalysis()
   }
 
-  /** 清除当前人脸分析故障并重新处理后续帧；没有故障时不执行操作 */
+  /** 清除当前人脸分析故障并重新处理后续帧；没有故障时不执行操作。 */
   @MainThread
   fun retry() {
     if (_failure.value == null) return

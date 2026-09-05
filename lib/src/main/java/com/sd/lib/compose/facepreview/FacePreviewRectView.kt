@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
+/** 按预览布局的像素坐标绘制人脸框，[rect] 为空时不绘制。 */
 @Composable
 fun FacePreviewRectView(
   modifier: Modifier = Modifier,

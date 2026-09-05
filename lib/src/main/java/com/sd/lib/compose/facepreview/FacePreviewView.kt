@@ -97,7 +97,7 @@ fun FacePreviewView(
   val usesSampledFrames = frameSource is FacePreviewFrameSource.PreviewSampled
   val errorCallback by rememberUpdatedState(onError)
   val stableFrameCallback by rememberUpdatedState(onStableFrame)
-  // 坐标或稳定帧配置变化时重建协调器，由 DisposableEffect 清空旧跟踪结果
+  // 坐标或稳定帧配置变化时重建协调器，由 DisposableEffect 清空旧跟踪结果。
   val frameCoordinator = remember(
     state,
     cameraState,

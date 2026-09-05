@@ -30,18 +30,18 @@ interface FacePreviewStability {
   fun reset()
 }
 
-/** 人脸静止后计算的当前帧取景状态，仅描述人脸框大小和位置 */
+/** 人脸静止后计算的当前帧取景状态，仅描述人脸框大小和位置。 */
 enum class FacePreviewFramingStatus {
   /** 人脸太小了 */
   FaceTooSmall,
 
-  /** 人脸太大了，已经无法同时满足对应方向的两侧边距要求 */
+  /** 人脸太大了，已经无法同时满足对应方向的两侧边距要求。 */
   FaceTooLarge,
 
-  /** 人脸大小允许，但当前位置太靠近预览边缘 */
+  /** 人脸大小允许，但当前位置太靠近预览边缘。 */
   FaceTooCloseToEdge,
 
-  /** 当前帧的人脸框大小和位置都合适，不代表已经满足持续静止时长要求 */
+  /** 当前帧的人脸框大小和位置都合适，不代表已经满足持续静止时长要求。 */
   FaceSuitable,
 }
 
@@ -99,11 +99,11 @@ class DefaultFacePreviewStability internal constructor(
   private val _isStill = mutableStateOf(false)
   private val _currentFramingStatus = mutableStateOf<FacePreviewFramingStatus?>(null)
 
-  /** 人脸框是否满足持续静止时长要求，无有效数据或调用 [reset] 后为 `false` */
+  /** 人脸框是否满足持续静止时长要求，无有效数据或调用 [reset] 后为 `false`。 */
   val isStill: State<Boolean>
     get() = _isStill
 
-  /** 最近一次人脸静止时计算的取景状态；无有效数据或调用 [reset] 后为 `null`，有效但未静止的帧不会清空 */
+  /** 最近一次人脸静止时计算的取景状态；无有效数据或调用 [reset] 后为 `null`，有效但未静止的帧不会清空。 */
   val currentFramingStatus: State<FacePreviewFramingStatus?>
     get() = _currentFramingStatus
 

@@ -18,6 +18,8 @@ interface FacePreviewAnalysisFrame {
   val rotationDegrees: Int
   val imageFaceRect: Rect
   val faceRect: Rect
+
+  /** 当前分析帧对应的预览布局尺寸，单位为像素。 */
   val previewSize: Size
 }
 
