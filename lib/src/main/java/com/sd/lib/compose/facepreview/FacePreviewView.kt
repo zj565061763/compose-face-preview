@@ -47,7 +47,8 @@ import android.graphics.Rect as AndroidRect
  *
  * - [faceDetector] 和 [FacePreviewStability.onFrame] 在相机分析线程同步调用，[FacePreviewState] 状态和外部回调在主线程发布。
  * - 按检测结果顺序使用第一个完全位于预览区域内的人脸，没有符合条件的人脸时清空人脸框。
- * - 达到稳定条件后暂停分析；调用 [FacePreviewState.resetStability] 可重置稳定状态并继续识别。
+ * - 达到稳定条件后暂停分析和预览采样；调用 [FacePreviewState.resetStability] 可重置稳定状态并继续识别。
+ * - 暂停采样时保持当前相机会话，已经排队的采样仍可能完成。
  *
  * 稳定帧回调：
  *
@@ -66,7 +67,7 @@ import android.graphics.Rect as AndroidRect
  *
  * 错误与恢复：
  *
- * - 人脸分析抛出 [Exception] 或发生 [OutOfMemoryError] 后暂停分析，将故障发布到 [FacePreviewState.failure] 并调用 [onError]。
+ * - 人脸分析抛出 [Exception] 或发生 [OutOfMemoryError] 后暂停分析和预览采样，将故障发布到 [FacePreviewState.failure] 并调用 [onError]。
  * - 稳定帧无法转换为 [FacePreviewFrame] 时按可恢复的人脸分析故障处理。
  * - 其他 [Error] 会在恢复内部状态后继续抛出，不会转换为普通检测错误。
  * - 更换 [faceDetector]、调用 [FacePreviewState.retry] 或 [FacePreviewState.resetStability] 后恢复人脸分析。
@@ -234,12 +235,7 @@ fun FacePreviewView(
           analyzedFrame = null
         }
       }
-      val frameProcessor = when (val source = frameSource) {
-        FacePreviewFrameSource.Preview -> FrameProcessor.Preview { frame -> frameCallback(frame) }
-        is FacePreviewFrameSource.PreviewSampled -> FrameProcessor.PreviewSampled(source.intervalMillis) { frame ->
-          frameCallback(frame)
-        }
-      }
+      val frameProcessor = createFacePreviewFrameProcessor(frameSource, state, frameCallback)
       CameraPreview(
         state = cameraState,
         devicesState = devicesState,
@@ -264,6 +260,21 @@ fun FacePreviewView(
     }
 
     overlay()
+  }
+}
+
+internal fun createFacePreviewFrameProcessor(
+  source: FacePreviewFrameSource,
+  state: FacePreviewState,
+  onFrame: (CameraFrame) -> Unit,
+): FrameProcessor {
+  return when (source) {
+    FacePreviewFrameSource.Preview -> FrameProcessor.Preview(onFrame)
+    is FacePreviewFrameSource.PreviewSampled -> {
+      // 保持采样模式，用最大间隔暂停截图，以保留当前相机会话。
+      val intervalMillis = if (state.isStable.value || state.failure.value != null) Long.MAX_VALUE else source.intervalMillis
+      FrameProcessor.PreviewSampled(intervalMillis, onFrame)
+    }
   }
 }
 
