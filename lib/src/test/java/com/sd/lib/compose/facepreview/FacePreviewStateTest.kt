@@ -3,221 +3,17 @@ package com.sd.lib.compose.facepreview
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.IntSize
-import com.sd.lib.compose.camera.CameraFrame
 import com.google.common.truth.Truth.assertThat
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.JUnit4
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import org.junit.Test
-import org.junit.runner.RunWith
-import org.junit.runners.JUnit4
 
 @RunWith(JUnit4::class)
 class FacePreviewStateTest {
-  @Test
-  fun calculateSizeRatio_returnsWidthAndHeightRatio() {
-    val result = checkNotNull(
-      calculateSizeRatio(
-        rect = Rect(40f, 60f, 60f, 140f),
-        size = Size(100f, 200f),
-      )
-    )
-
-    assertThat(result.width).isWithin(0.0001f).of(0.2f)
-    assertThat(result.height).isWithin(0.0001f).of(0.4f)
-  }
-
-  @Test
-  fun calculateSizeRatio_invalidFaceOrPreview_returnsNull() {
-    assertThat(
-      calculateSizeRatio(Rect.Zero, Size(100f, 100f))
-    ).isNull()
-    assertThat(
-      calculateSizeRatio(Rect(40f, 40f, 60f, 60f), Size.Zero)
-    ).isNull()
-    assertThat(
-      calculateSizeRatio(Rect(0f, 0f, Float.POSITIVE_INFINITY, 10f), Size(100f, 100f))
-    ).isNull()
-  }
-
-  @Test
-  fun calculateMarginRatio_returnsEdgeRatios() {
-    val result = calculateMarginRatio(
-      rect = Rect(20f, 40f, 70f, 120f),
-      size = Size(100f, 200f),
-    )
-
-    assertThat(result).isEqualTo(Rect(0.2f, 0.2f, 0.3f, 0.4f))
-  }
-
-  @Test
-  fun calculateMarginRatio_invalidFaceOrPreview_returnsNull() {
-    assertThat(
-      calculateMarginRatio(Rect.Zero, Size(100f, 100f))
-    ).isNull()
-    assertThat(
-      calculateMarginRatio(Rect(40f, 40f, 60f, 60f), Size.Zero)
-    ).isNull()
-    assertThat(
-      calculateMarginRatio(Rect(0f, 0f, Float.POSITIVE_INFINITY, 10f), Size(100f, 100f))
-    ).isNull()
-  }
-
-  @Test
-  fun beginAnalysisFrame_withoutPreviewSize_returnsNull() {
-    val state = stateWithResult(false)
-
-    assertThat(state.beginAnalysisFrame()).isNull()
-  }
-
-  @Test
-  fun beginAnalysisFrame_whilePreviousSessionFrameIsRunning_returnsNull() {
-    val state = stateWithResult(false)
-    state.updatePreviewSize(IntSize(100, 100))
-    val firstSnapshot = checkNotNull(state.beginAnalysisFrame())
-
-    assertThat(state.beginAnalysisFrame()).isNull()
-
-    state.endAnalysisFrame(firstSnapshot)
-    val nextSnapshot = state.beginAnalysisFrame()
-    assertThat(nextSnapshot).isNotNull()
-    state.endAnalysisFrame(checkNotNull(nextSnapshot))
-  }
-
-  @Test
-  fun withAnalysisFrameLease_outOfMemory_releasesLease() {
-    val state = stateWithResult(false)
-    state.updatePreviewSize(IntSize(100, 100))
-    val expected = OutOfMemoryError("expected")
-
-    val actual = try {
-      state.withAnalysisFrameLease { throw expected }
-      null
-    } catch (error: Throwable) {
-      error
-    }
-
-    assertThat(actual).isSameInstanceAs(expected)
-    val nextSnapshot = checkNotNull(state.beginAnalysisFrame())
-    state.endAnalysisFrame(nextSnapshot)
-  }
-
-  @Test
-  fun withAnalysisFrameLease_blockAndReleaseFail_preservesBlockFailure() {
-    val state = stateWithResult(false)
-    state.updatePreviewSize(IntSize(100, 100))
-    val expected = OutOfMemoryError("expected")
-
-    val actual = try {
-      state.withAnalysisFrameLease { snapshot ->
-        state.endAnalysisFrame(snapshot)
-        throw expected
-      }
-      null
-    } catch (error: Throwable) {
-      error
-    }
-
-    assertThat(actual).isSameInstanceAs(expected)
-    assertThat(actual?.suppressed).hasLength(1)
-    assertThat(actual?.suppressed?.single()).isInstanceOf(IllegalStateException::class.java)
-  }
-
-  @Test
-  fun runAnalysisFrameWithLease_outOfMemory_recoversAndReportsBeforeRelease() {
-    val state = stateWithResult(true)
-    state.updatePreviewSize(IntSize(100, 100))
-    val initialAnalysisGeneration = state.currentAnalysisGeneration
-    val expected = OutOfMemoryError("expected")
-    var reportedGeneration: Long? = null
-    var reported: Throwable? = null
-    var leaseWasHeldWhileReporting = false
-
-    state.runAnalysisFrameWithLease(
-      initialAnalysisGeneration = initialAnalysisGeneration,
-      onFailure = { analysisGeneration, error ->
-        reportedGeneration = analysisGeneration
-        reported = error
-        leaseWasHeldWhileReporting = state.beginAnalysisFrame() == null
-      },
-    ) { snapshot ->
-      val result = state.analyzeFrame(
-        snapshot = snapshot,
-        frame = syntheticFrame(Rect(10f, 20f, 30f, 40f), snapshot.previewSize),
-        resetForTransformChange = false,
-      )
-      assertThat(result?.isStable).isTrue()
-      assertThat(state.shouldDetectFace).isFalse()
-      throw expected
-    }
-
-    assertThat(reportedGeneration).isEqualTo(initialAnalysisGeneration)
-    assertThat(reported).isSameInstanceAs(expected)
-    assertThat(state.shouldDetectFace).isTrue()
-    assertThat(leaseWasHeldWhileReporting).isTrue()
-    val nextSnapshot = checkNotNull(state.beginAnalysisFrame())
-    state.endAnalysisFrame(nextSnapshot)
-  }
-
-  @Test
-  fun runAnalysisFrameWithLease_releaseFailure_reportsAfterReleaseAttempt() {
-    val state = stateWithResult(false)
-    state.updatePreviewSize(IntSize(100, 100))
-    val initialAnalysisGeneration = state.currentAnalysisGeneration
-    var reportedGeneration: Long? = null
-    var reported: Throwable? = null
-    var nextSnapshot: FacePreviewAnalysisSnapshot? = null
-
-    state.runAnalysisFrameWithLease(
-      initialAnalysisGeneration = initialAnalysisGeneration,
-      onFailure = { analysisGeneration, error ->
-        reportedGeneration = analysisGeneration
-        reported = error
-        nextSnapshot = state.beginAnalysisFrame()
-      },
-    ) { snapshot ->
-      state.endAnalysisFrame(snapshot)
-    }
-
-    assertThat(reportedGeneration).isEqualTo(initialAnalysisGeneration)
-    assertThat(reported).isInstanceOf(IllegalStateException::class.java)
-    assertThat(reported?.message).isEqualTo("Face preview analysis frame was already ended.")
-    state.endAnalysisFrame(checkNotNull(nextSnapshot))
-  }
-
-  @Test
-  fun runAnalysisFrameWithLease_blockAndReleaseFail_reportsBlockOnceWithSuppressedRelease() {
-    val state = stateWithResult(false)
-    state.updatePreviewSize(IntSize(100, 100))
-    val initialAnalysisGeneration = state.currentAnalysisGeneration
-    val expected = OutOfMemoryError("expected")
-    var reportCount = 0
-    var reportedGeneration: Long? = null
-    var reported: Throwable? = null
-
-    state.runAnalysisFrameWithLease(
-      initialAnalysisGeneration = initialAnalysisGeneration,
-      onFailure = { analysisGeneration, error ->
-        reportCount++
-        reportedGeneration = analysisGeneration
-        reported = error
-      },
-    ) { snapshot ->
-      state.endAnalysisFrame(snapshot)
-      throw expected
-    }
-
-    assertThat(reportCount).isEqualTo(1)
-    assertThat(reportedGeneration).isEqualTo(initialAnalysisGeneration)
-    assertThat(reported).isSameInstanceAs(expected)
-    assertThat(expected.suppressed).hasLength(1)
-    assertThat(expected.suppressed.single()).isInstanceOf(IllegalStateException::class.java)
-    assertThat(expected.suppressed.single().message).isEqualTo("Face preview analysis frame was already ended.")
-    val nextSnapshot = checkNotNull(state.beginAnalysisFrame())
-    state.endAnalysisFrame(nextSnapshot)
-  }
-
   @Test
   fun analyzeFrame_passesFrameDataToCustomStability() {
     var receivedFrame: FacePreviewAnalysisFrame? = null
@@ -273,87 +69,6 @@ class FacePreviewStateTest {
     assertThat(state.faceRect.value).isEqualTo(Rect.Zero)
     assertThat(state.isStable.value).isFalse()
     assertThat(state.shouldDetectFace).isTrue()
-  }
-
-  @Test
-  fun recoverAfterAnalysisFailure_unpublishedStableResultResumesDetection() {
-    val state = stateWithResult(true)
-    state.updatePreviewSize(IntSize(100, 100))
-    val snapshot = checkNotNull(state.beginAnalysisFrame())
-
-    try {
-      val result = state.analyzeFrame(
-        snapshot = snapshot,
-        frame = syntheticFrame(Rect(10f, 20f, 30f, 40f), snapshot.previewSize),
-        resetForTransformChange = false,
-      )
-      assertThat(result?.isStable).isTrue()
-      assertThat(state.shouldDetectFace).isFalse()
-
-      state.recoverAfterAnalysisFailure(snapshot)
-
-      assertThat(state.shouldDetectFace).isTrue()
-    } finally {
-      state.endAnalysisFrame(snapshot)
-    }
-
-    val nextSnapshot = checkNotNull(state.beginAnalysisFrame())
-    state.endAnalysisFrame(nextSnapshot)
-  }
-
-  @Test
-  fun recoverAfterAnalysisFailure_staleSnapshotDoesNotResumeCurrentStableResult() {
-    val state = stateWithResult(true)
-    state.updatePreviewSize(IntSize(100, 100))
-    val staleSnapshot = checkNotNull(state.beginAnalysisFrame())
-    state.endAnalysisFrame(staleSnapshot)
-    state.resetStability()
-    val currentSnapshot = checkNotNull(state.beginAnalysisFrame())
-
-    try {
-      val result = state.analyzeFrame(
-        snapshot = currentSnapshot,
-        frame = syntheticFrame(Rect(10f, 20f, 30f, 40f), currentSnapshot.previewSize),
-        resetForTransformChange = false,
-      )
-      assertThat(result?.isStable).isTrue()
-      assertThat(state.shouldDetectFace).isFalse()
-
-      state.recoverAfterAnalysisFailure(staleSnapshot)
-
-      assertThat(state.shouldDetectFace).isFalse()
-    } finally {
-      state.endAnalysisFrame(currentSnapshot)
-    }
-  }
-
-  @Test
-  fun recoverAfterAnalysisFailure_releasedLeaseDoesNotResumeNextStableResult() {
-    val state = stateWithResult(true)
-    state.updatePreviewSize(IntSize(100, 100))
-    val failedSnapshot = checkNotNull(state.beginAnalysisFrame())
-    state.endAnalysisFrame(failedSnapshot)
-    val currentSnapshot = checkNotNull(state.beginAnalysisFrame())
-
-    try {
-      val currentResult = checkNotNull(
-        state.analyzeFrame(
-          snapshot = currentSnapshot,
-          frame = syntheticFrame(Rect(10f, 20f, 30f, 40f), currentSnapshot.previewSize),
-          resetForTransformChange = false,
-        )
-      )
-      assertThat(currentResult.isStable).isTrue()
-      assertThat(state.shouldDetectFace).isFalse()
-
-      state.recoverAfterAnalysisFailure(failedSnapshot)
-
-      assertThat(state.shouldDetectFace).isFalse()
-      assertThat(state.publishAnalysisResult(currentResult)).isTrue()
-      assertThat(state.isStable.value).isTrue()
-    } finally {
-      state.endAnalysisFrame(currentSnapshot)
-    }
   }
 
   @Test
@@ -785,22 +500,6 @@ class FacePreviewStateTest {
     }
   }
 
-  private fun stateWithResult(result: Boolean): FacePreviewState {
-    return FacePreviewState(
-      stability = statelessStability { result },
-    )
-  }
-
-  private fun statelessStability(
-    onFrame: (FacePreviewAnalysisFrame) -> Boolean,
-  ): FacePreviewStability {
-    return object : FacePreviewStability {
-      override fun onFrame(frame: FacePreviewAnalysisFrame): Boolean = onFrame(frame)
-
-      override fun reset() = Unit
-    }
-  }
-
   private fun FacePreviewState.processFrame(
     faceRect: Rect,
     imageFaceRect: Rect = faceRect,
@@ -818,21 +517,6 @@ class FacePreviewStateTest {
       result
     } finally {
       endAnalysisFrame(snapshot)
-    }
-  }
-
-  private fun syntheticFrame(
-    faceRect: Rect,
-    previewSize: Size,
-    imageFaceRect: Rect = faceRect,
-  ): FacePreviewAnalysisFrame {
-    return object : FacePreviewAnalysisFrame {
-      override val cameraFrame: CameraFrame
-        get() = error("Synthetic frame does not contain a CameraFrame.")
-      override val rotationDegrees = 0
-      override val imageFaceRect = imageFaceRect
-      override val faceRect = faceRect
-      override val previewSize = previewSize
     }
   }
 

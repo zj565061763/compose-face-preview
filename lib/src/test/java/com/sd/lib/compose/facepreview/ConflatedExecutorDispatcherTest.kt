@@ -1,11 +1,11 @@
 package com.sd.lib.compose.facepreview
 
 import com.google.common.truth.Truth.assertThat
-import java.util.ArrayDeque
-import java.util.concurrent.Executor
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
+import java.util.ArrayDeque
+import java.util.concurrent.Executor
 
 @RunWith(JUnit4::class)
 class ConflatedExecutorDispatcherTest {

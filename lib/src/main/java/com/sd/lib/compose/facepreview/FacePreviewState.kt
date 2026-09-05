@@ -286,8 +286,7 @@ internal inline fun FacePreviewState.withAnalysisFrameLease(
     try {
       endAnalysisFrame(snapshot)
     } catch (releaseError: Throwable) {
-      val failure = blockFailure
-      if (failure == null) throw releaseError
+      val failure = blockFailure ?: throw releaseError
       if (failure !== releaseError) failure.addSuppressed(releaseError)
     }
   }

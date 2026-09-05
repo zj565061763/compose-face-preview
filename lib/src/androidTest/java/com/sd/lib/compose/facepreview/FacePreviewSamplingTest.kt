@@ -16,11 +16,11 @@ import com.sd.lib.compose.camera.CameraFrame
 import com.sd.lib.compose.camera.CameraFrameTransformIdentity
 import com.sd.lib.compose.camera.FrameProcessor
 import com.sd.lib.compose.camera.PreviewSampledFrameDispatcher
+import org.junit.Test
+import org.junit.runner.RunWith
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.Test
-import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class FacePreviewSamplingTest {
