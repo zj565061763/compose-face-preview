@@ -31,7 +31,7 @@ androidx-test-runner = "androidx.test:runner:1.7.0"
 androidx-test-espresso-core = "androidx.test.espresso:espresso-core:3.7.0"
 
 sd-face-detector = "io.github.zj565061763.android:face-detector:1.1.0"
-sd-compose-camera = "io.github.zj565061763.android:compose-camera:1.1.0"
+sd-compose-camera = "io.github.zj565061763.android:compose-camera:1.1.1"
 
 [plugins]
 
