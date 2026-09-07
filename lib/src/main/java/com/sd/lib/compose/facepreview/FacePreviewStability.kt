@@ -168,8 +168,8 @@ class DefaultFacePreviewStability internal constructor(
 
 private const val DefaultSizeRatio = 0.1f
 
-private const val DefaultHorizontalMarginRatio = 0.05f
-private const val DefaultVerticalMarginRatio = 0.05f
+private const val DefaultHorizontalMarginRatio = 0.01f
+private const val DefaultVerticalMarginRatio = 0.01f
 
 private const val DefaultRequiredStableDurationMillis = 500L
 private const val DefaultMaxCenterMovementRatio = 0.1f
