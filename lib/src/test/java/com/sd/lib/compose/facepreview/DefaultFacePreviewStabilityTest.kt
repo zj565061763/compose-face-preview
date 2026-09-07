@@ -271,15 +271,15 @@ class DefaultFacePreviewStabilityTest {
   }
 
   @Test
-  fun stability_defaultMargins_requireMoreThanTenPercentOnEverySide() {
+  fun stability_defaultMargins_requireMoreThanFivePercentOnEverySide() {
     val stability = DefaultFacePreviewStability(
       sizeRatio = 0f,
       requiredStableDurationMillis = 0L,
     )
     val previewSize = Size(100f, 100f)
 
-    assertThat(stability.onFrame(Rect(10f, 11f, 89f, 89f), previewSize)).isFalse()
-    assertThat(stability.onFrame(Rect(11f, 11f, 89f, 89f), previewSize)).isTrue()
+    assertThat(stability.onFrame(Rect(5f, 6f, 94f, 94f), previewSize)).isFalse()
+    assertThat(stability.onFrame(Rect(6f, 6f, 94f, 94f), previewSize)).isTrue()
   }
 
   @Test
